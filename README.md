@@ -64,12 +64,13 @@ As you use your agent, corrections and preferences get **categorized and logged 
 ## Install
 
 ### From ClaWHub (recommended)
-```bash
-npm i -g clawhub  # if not already installed
-clawhub install training-manager
-```
 
-**ClaWHub listing:** https://clawhub.ai/anova44/openclaw-training-manager
+Visit **https://clawhub.ai/anova44/openclaw-training-manager** and click the install button.
+
+Or via command line:
+```bash
+clawhub install anova44/openclaw-training-manager
+```
 
 ### From GitHub
 ```bash
