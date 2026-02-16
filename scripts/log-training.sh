@@ -7,6 +7,33 @@ TIMESTAMP=$(date +%H:%M:%S)
 
 CATEGORY="${1:?Usage: log-training.sh <category> <content>  (categories: agents, soul, user, memory, daily, consolidate)}"
 
+# --- Input validation ---
+# Reject content containing shell metacharacters that could cause issues
+# if this script is ever invoked in an unsafe context.
+validate_content() {
+  local input="$1"
+  # Block backticks and $() command substitution patterns
+  if printf '%s' "$input" | grep -qE '`|\$\('; then
+    echo "ERROR: Content contains shell metacharacters (\` or \$()). Refusing to write."
+    echo "Remove backticks and command substitutions, then retry."
+    exit 1
+  fi
+}
+
+# Validate category is one of the allowed values
+validate_category() {
+  case "$1" in
+    agents|soul|user|memory|daily|consolidate) return 0 ;;
+    *)
+      echo "ERROR: Unknown category '$1'"
+      echo "Valid categories: agents, soul, user, memory, daily, consolidate"
+      exit 1
+      ;;
+  esac
+}
+
+validate_category "$CATEGORY"
+
 # --- Consolidate command: merge Training Update sections into main body ---
 if [ "$CATEGORY" = "consolidate" ]; then
   TARGET_FILE="${2:-}"
@@ -27,6 +54,22 @@ if [ "$CATEGORY" = "consolidate" ]; then
     exit 0
   fi
 
+  # Validate TARGET_FILE: must be a simple filename, no path traversal
+  if printf '%s' "$TARGET_FILE" | grep -qE '/|\\|\.\.'; then
+    echo "ERROR: Invalid filename '$TARGET_FILE'. Must be a simple filename (e.g. AGENTS.md), no paths."
+    exit 1
+  fi
+
+  # Whitelist: only allow known workspace files
+  case "$TARGET_FILE" in
+    SOUL.md|AGENTS.md|USER.md|TOOLS.md|IDENTITY.md|MEMORY.md) ;;
+    *)
+      echo "ERROR: Consolidation only works on workspace bootstrap files."
+      echo "Allowed: SOUL.md, AGENTS.md, USER.md, TOOLS.md, IDENTITY.md, MEMORY.md"
+      exit 1
+      ;;
+  esac
+
   FULL_PATH="$WORKSPACE/$TARGET_FILE"
   if [ ! -f "$FULL_PATH" ]; then
     echo "ERROR: $FULL_PATH does not exist."
@@ -41,11 +84,10 @@ if [ "$CATEGORY" = "consolidate" ]; then
 
   # Extract all training update content into a staging file
   STAGING="$WORKSPACE/.training-consolidate-staging.md"
-  echo "# Pending Consolidation from $TARGET_FILE" > "$STAGING"
-  echo "# $count Training Update section(s) extracted on $TODAY $TIMESTAMP" >> "$STAGING"
-  echo "# Review these items and merge them into the main sections of $TARGET_FILE," >> "$STAGING"
-  echo "# then delete this staging file." >> "$STAGING"
-  echo "" >> "$STAGING"
+  printf '# Pending Consolidation from %s\n' "$TARGET_FILE" > "$STAGING"
+  printf '# %d Training Update section(s) extracted on %s %s\n' "$count" "$TODAY" "$TIMESTAMP" >> "$STAGING"
+  printf '# Review these items and merge them into the main sections of %s,\n' "$TARGET_FILE" >> "$STAGING"
+  printf '# then delete this staging file.\n\n' >> "$STAGING"
 
   # Extract lines within "## Training Update" sections (inclusive)
   # Stop at ANY heading that isn't a Training Update; check stop before print
@@ -67,17 +109,20 @@ if [ "$CATEGORY" = "consolidate" ]; then
 
   echo "=== Consolidation ==="
   printf '  Extracted %d Training Update section(s) from %s\n' "$count" "$TARGET_FILE"
-  echo "  Staging file: $STAGING"
+  printf '  Staging file: %s\n' "$STAGING"
   echo ""
   echo "Next steps:"
-  echo "  1. Review $STAGING"
-  echo "  2. Merge the items into the appropriate sections of $TARGET_FILE"
-  echo "  3. Delete the staging file: rm $STAGING"
+  printf '  1. Review %s\n' "$STAGING"
+  printf '  2. Merge the items into the appropriate sections of %s\n' "$TARGET_FILE"
+  printf '  3. Delete the staging file: rm %s\n' "$STAGING"
   exit 0
 fi
 
 # --- Normal logging ---
 CONTENT="${2:?Missing content to log}"
+
+# Validate content for shell metacharacters
+validate_content "$CONTENT"
 
 case "$CATEGORY" in
   agents)
@@ -133,12 +178,6 @@ case "$CATEGORY" in
     printf '## %s\n' "$TIMESTAMP" >> "$TARGET"
     printf -- '- %s\n\n' "$CONTENT" >> "$TARGET"
     echo "Appended to memory/$TODAY.md"
-    ;;
-
-  *)
-    echo "ERROR: Unknown category '$CATEGORY'"
-    echo "Valid categories: agents, soul, user, memory, daily, consolidate"
-    exit 1
     ;;
 esac
 
