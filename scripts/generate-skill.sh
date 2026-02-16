@@ -21,11 +21,59 @@ validate_input() {
   fi
 }
 
+# --- Prompt injection detection ---
+# Skill instructions become part of the agent's system prompt.
+# Reject content that attempts to override agent behavior.
+check_prompt_injection() {
+  local label="$1"
+  local input="$2"
+  local input_lower
+  input_lower=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
+
+  local -a patterns=(
+    'ignore (all |any )?(previous |prior |above )?instructions'
+    'ignore (all |any )?(previous |prior |above )?rules'
+    'disregard (all |any )?(previous |prior |above )?instructions'
+    'forget (all |any )?(previous |prior |above )?instructions'
+    'override (all |any )?(previous |prior |above )?instructions'
+    'you are now'
+    'new instructions:'
+    'system prompt'
+    'act as if'
+    'pretend (that |to )'
+    'from now on.*(ignore|disregard|forget|override)'
+    'do not follow.*(previous|prior|above|original)'
+    'secret(ly)? (send|transmit|upload|exfiltrate|forward|email|post)'
+    'send.*(all|every).*(file|data|content|message|info).* to'
+    'upload.*(all|every).*(file|data|content|message|info).* to'
+    'exfiltrate'
+    'curl .*(POST|PUT|PATCH)'
+    'wget .*--post'
+    'base64 (encode|decode|--decode|-d)'
+  )
+
+  for pattern in "${patterns[@]}"; do
+    if printf '%s' "$input_lower" | grep -qEi "$pattern"; then
+      printf 'ERROR: %s rejected -- matches prompt injection pattern.\n' "$label"
+      printf 'Blocked pattern: %s\n' "$pattern"
+      echo ""
+      echo "If this is legitimate content, create the SKILL.md manually instead of"
+      echo "using this script. This filter protects against malicious instructions"
+      echo "being embedded into generated skills."
+      exit 1
+    fi
+  done
+}
+
 validate_input "name" "$NAME"
 validate_input "description" "$DESCRIPTION"
 validate_input "instructions" "$INSTRUCTIONS"
 validate_input "requires_bins" "$REQUIRES_BINS"
 validate_input "requires_env" "$REQUIRES_ENV"
+
+# Check high-risk fields for prompt injection
+check_prompt_injection "description" "$DESCRIPTION"
+check_prompt_injection "instructions" "$INSTRUCTIONS"
 
 # Validate requires_bins and requires_env: only allow alphanumeric, hyphens, underscores, commas
 if [ -n "$REQUIRES_BINS" ]; then

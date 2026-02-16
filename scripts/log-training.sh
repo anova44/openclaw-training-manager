@@ -20,6 +20,50 @@ validate_content() {
   fi
 }
 
+# --- Prompt injection detection ---
+# Content written to workspace files becomes part of the agent's system prompt.
+# Reject content that looks like it's trying to inject instructions into the agent.
+check_prompt_injection() {
+  local input="$1"
+  local input_lower
+  input_lower=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
+
+  # Patterns that indicate prompt injection attempts
+  local -a patterns=(
+    'ignore (all |any )?(previous |prior |above )?instructions'
+    'ignore (all |any )?(previous |prior |above )?rules'
+    'disregard (all |any )?(previous |prior |above )?instructions'
+    'forget (all |any )?(previous |prior |above )?instructions'
+    'override (all |any )?(previous |prior |above )?instructions'
+    'you are now'
+    'new instructions:'
+    'system prompt'
+    'act as if'
+    'pretend (that |to )'
+    'from now on.*(ignore|disregard|forget|override)'
+    'do not follow.*(previous|prior|above|original)'
+    'secret(ly)? (send|transmit|upload|exfiltrate|forward|email|post)'
+    'send.*(all|every).*(file|data|content|message|info).* to'
+    'upload.*(all|every).*(file|data|content|message|info).* to'
+    'exfiltrate'
+    'curl .*(POST|PUT|PATCH)'
+    'wget .*--post'
+    'base64 (encode|decode|--decode|-d)'
+  )
+
+  for pattern in "${patterns[@]}"; do
+    if printf '%s' "$input_lower" | grep -qEi "$pattern"; then
+      echo "ERROR: Content rejected -- matches prompt injection pattern."
+      printf 'Blocked pattern: %s\n' "$pattern"
+      echo ""
+      echo "If this is legitimate content, edit the target file directly instead of"
+      echo "using this script. This filter protects against instructions being"
+      echo "injected into the agent's behavioral rules."
+      exit 1
+    fi
+  done
+}
+
 # Validate category is one of the allowed values
 validate_category() {
   case "$1" in
@@ -121,8 +165,9 @@ fi
 # --- Normal logging ---
 CONTENT="${2:?Missing content to log}"
 
-# Validate content for shell metacharacters
+# Validate content for shell metacharacters and prompt injection
 validate_content "$CONTENT"
+check_prompt_injection "$CONTENT"
 
 case "$CATEGORY" in
   agents)
