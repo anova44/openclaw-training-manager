@@ -3,77 +3,29 @@ set -euo pipefail
 
 WORKSPACE="${OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}"
 
+# Source shared security library
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/security.sh"
+
 NAME="${1:?Usage: generate-skill.sh <name> <description> <instructions> [requires_bins] [requires_env]}"
 DESCRIPTION="${2:?Missing description}"
 INSTRUCTIONS="${3:?Missing instructions}"
 REQUIRES_BINS="${4:-}"
 REQUIRES_ENV="${5:-}"
 
+# --- Rate limit ---
+check_rate_limit "generate-skill"
+
 # --- Input validation ---
-# Reject inputs containing shell metacharacters that could cause issues
-validate_input() {
-  local label="$1"
-  local input="$2"
-  if printf '%s' "$input" | grep -qE '`|\$\('; then
-    printf 'ERROR: %s contains shell metacharacters (` or $()). Refusing to proceed.\n' "$label"
-    echo "Remove backticks and command substitutions, then retry."
-    exit 1
-  fi
-}
+validate_shell_safety "name" "$NAME"
+validate_shell_safety "description" "$DESCRIPTION"
+validate_shell_safety "instructions" "$INSTRUCTIONS"
+validate_shell_safety "requires_bins" "$REQUIRES_BINS"
+validate_shell_safety "requires_env" "$REQUIRES_ENV"
 
-# --- Prompt injection detection ---
-# Skill instructions become part of the agent's system prompt.
-# Reject content that attempts to override agent behavior.
-check_prompt_injection() {
-  local label="$1"
-  local input="$2"
-  local input_lower
-  input_lower=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
-
-  local -a patterns=(
-    'ignore (all |any )?(previous |prior |above )?instructions'
-    'ignore (all |any )?(previous |prior |above )?rules'
-    'disregard (all |any )?(previous |prior |above )?instructions'
-    'forget (all |any )?(previous |prior |above )?instructions'
-    'override (all |any )?(previous |prior |above )?instructions'
-    'you are now'
-    'new instructions:'
-    'system prompt'
-    'act as if'
-    'pretend (that |to )'
-    'from now on.*(ignore|disregard|forget|override)'
-    'do not follow.*(previous|prior|above|original)'
-    'secret(ly)? (send|transmit|upload|exfiltrate|forward|email|post)'
-    'send.*(all|every).*(file|data|content|message|info).* to'
-    'upload.*(all|every).*(file|data|content|message|info).* to'
-    'exfiltrate'
-    'curl .*(POST|PUT|PATCH)'
-    'wget .*--post'
-    'base64 (encode|decode|--decode|-d)'
-  )
-
-  for pattern in "${patterns[@]}"; do
-    if printf '%s' "$input_lower" | grep -qEi "$pattern"; then
-      printf 'ERROR: %s rejected -- matches prompt injection pattern.\n' "$label"
-      printf 'Blocked pattern: %s\n' "$pattern"
-      echo ""
-      echo "If this is legitimate content, create the SKILL.md manually instead of"
-      echo "using this script. This filter protects against malicious instructions"
-      echo "being embedded into generated skills."
-      exit 1
-    fi
-  done
-}
-
-validate_input "name" "$NAME"
-validate_input "description" "$DESCRIPTION"
-validate_input "instructions" "$INSTRUCTIONS"
-validate_input "requires_bins" "$REQUIRES_BINS"
-validate_input "requires_env" "$REQUIRES_ENV"
-
-# Check high-risk fields for prompt injection
-check_prompt_injection "description" "$DESCRIPTION"
-check_prompt_injection "instructions" "$INSTRUCTIONS"
+# Check high-risk fields for prompt injection (normal tier — generated skills)
+check_prompt_injection_tiered "$DESCRIPTION" "MEMORY.md" "description"
+check_prompt_injection_tiered "$INSTRUCTIONS" "MEMORY.md" "instructions"
 
 # Validate requires_bins and requires_env: only allow alphanumeric, hyphens, underscores, commas
 if [ -n "$REQUIRES_BINS" ]; then
@@ -109,28 +61,40 @@ fi
 mkdir -p "$SKILL_DIR"
 
 # Build metadata JSON
-# NOTE: JSON is constructed via string concatenation. This works for simple
-# comma-separated values (e.g. "curl,jq") but will break if bin/env names
-# contain quotes, spaces, or special characters. For complex cases, pipe
-# through jq if available:
-#   jq -n --arg bins "$REQUIRES_BINS" '$bins | split(",") | {bins: .}'
+# Uses jq when available for robust JSON construction.
+# Falls back to string concatenation for environments without jq.
 METADATA=""
-REQUIRES_PARTS=()
 
-if [ -n "$REQUIRES_BINS" ]; then
-  # Convert comma-separated bins to JSON array
-  BINS_JSON=$(printf '%s' "$REQUIRES_BINS" | sed 's/,/","/g')
-  REQUIRES_PARTS+=("\"bins\":[\"$BINS_JSON\"]")
-fi
-
-if [ -n "$REQUIRES_ENV" ]; then
-  ENV_JSON=$(printf '%s' "$REQUIRES_ENV" | sed 's/,/","/g')
-  REQUIRES_PARTS+=("\"env\":[\"$ENV_JSON\"]")
-fi
-
-if [ ${#REQUIRES_PARTS[@]} -gt 0 ]; then
-  REQUIRES_JOINED=$(IFS=,; printf '%s' "${REQUIRES_PARTS[*]}")
-  METADATA="metadata: {\"openclaw\":{\"requires\":{$REQUIRES_JOINED}}}"
+if [ -n "$REQUIRES_BINS" ] || [ -n "$REQUIRES_ENV" ]; then
+  if command -v jq &>/dev/null; then
+    # --- jq path: proper JSON encoding ---
+    REQUIRES_OBJ="{}"
+    if [ -n "$REQUIRES_BINS" ]; then
+      REQUIRES_OBJ=$(printf '%s' "$REQUIRES_OBJ" | jq --arg bins "$REQUIRES_BINS" '.bins = ($bins | split(","))')
+    fi
+    if [ -n "$REQUIRES_ENV" ]; then
+      REQUIRES_OBJ=$(printf '%s' "$REQUIRES_OBJ" | jq --arg env "$REQUIRES_ENV" '.env = ($env | split(","))')
+    fi
+    METADATA_JSON=$(printf '%s' "$REQUIRES_OBJ" | jq -c '{openclaw: {requires: .}}')
+    METADATA="metadata: $METADATA_JSON"
+  else
+    # --- Fallback: string concatenation ---
+    # Safe here because requires_bins/requires_env are validated above
+    # to contain only [a-zA-Z0-9_,.-] characters.
+    REQUIRES_PARTS=()
+    if [ -n "$REQUIRES_BINS" ]; then
+      BINS_JSON=$(printf '%s' "$REQUIRES_BINS" | sed 's/,/","/g')
+      REQUIRES_PARTS+=("\"bins\":[\"$BINS_JSON\"]")
+    fi
+    if [ -n "$REQUIRES_ENV" ]; then
+      ENV_JSON=$(printf '%s' "$REQUIRES_ENV" | sed 's/,/","/g')
+      REQUIRES_PARTS+=("\"env\":[\"$ENV_JSON\"]")
+    fi
+    if [ ${#REQUIRES_PARTS[@]} -gt 0 ]; then
+      REQUIRES_JOINED=$(IFS=,; printf '%s' "${REQUIRES_PARTS[*]}")
+      METADATA="metadata: {\"openclaw\":{\"requires\":{$REQUIRES_JOINED}}}"
+    fi
+  fi
 fi
 
 # Write SKILL.md using printf to avoid echo expansion issues

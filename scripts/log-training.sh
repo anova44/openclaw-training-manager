@@ -5,64 +5,11 @@ WORKSPACE="${OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}"
 TODAY=$(date +%Y-%m-%d)
 TIMESTAMP=$(date +%H:%M:%S)
 
+# Source shared security library
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/security.sh"
+
 CATEGORY="${1:?Usage: log-training.sh <category> <content>  (categories: agents, soul, user, memory, daily, consolidate)}"
-
-# --- Input validation ---
-# Reject content containing shell metacharacters that could cause issues
-# if this script is ever invoked in an unsafe context.
-validate_content() {
-  local input="$1"
-  # Block backticks and $() command substitution patterns
-  if printf '%s' "$input" | grep -qE '`|\$\('; then
-    echo "ERROR: Content contains shell metacharacters (\` or \$()). Refusing to write."
-    echo "Remove backticks and command substitutions, then retry."
-    exit 1
-  fi
-}
-
-# --- Prompt injection detection ---
-# Content written to workspace files becomes part of the agent's system prompt.
-# Reject content that looks like it's trying to inject instructions into the agent.
-check_prompt_injection() {
-  local input="$1"
-  local input_lower
-  input_lower=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
-
-  # Patterns that indicate prompt injection attempts
-  local -a patterns=(
-    'ignore (all |any )?(previous |prior |above )?instructions'
-    'ignore (all |any )?(previous |prior |above )?rules'
-    'disregard (all |any )?(previous |prior |above )?instructions'
-    'forget (all |any )?(previous |prior |above )?instructions'
-    'override (all |any )?(previous |prior |above )?instructions'
-    'you are now'
-    'new instructions:'
-    'system prompt'
-    'act as if'
-    'pretend (that |to )'
-    'from now on.*(ignore|disregard|forget|override)'
-    'do not follow.*(previous|prior|above|original)'
-    'secret(ly)? (send|transmit|upload|exfiltrate|forward|email|post)'
-    'send.*(all|every).*(file|data|content|message|info).* to'
-    'upload.*(all|every).*(file|data|content|message|info).* to'
-    'exfiltrate'
-    'curl .*(POST|PUT|PATCH)'
-    'wget .*--post'
-    'base64 (encode|decode|--decode|-d)'
-  )
-
-  for pattern in "${patterns[@]}"; do
-    if printf '%s' "$input_lower" | grep -qEi "$pattern"; then
-      echo "ERROR: Content rejected -- matches prompt injection pattern."
-      printf 'Blocked pattern: %s\n' "$pattern"
-      echo ""
-      echo "If this is legitimate content, edit the target file directly instead of"
-      echo "using this script. This filter protects against instructions being"
-      echo "injected into the agent's behavioral rules."
-      exit 1
-    fi
-  done
-}
 
 # Validate category is one of the allowed values
 validate_category() {
@@ -73,6 +20,18 @@ validate_category() {
       echo "Valid categories: agents, soul, user, memory, daily, consolidate"
       exit 1
       ;;
+  esac
+}
+
+# Map category to target filename for tiered filtering
+_category_to_target() {
+  case "$1" in
+    agents) echo "AGENTS.md" ;;
+    soul)   echo "SOUL.md" ;;
+    user)   echo "USER.md" ;;
+    memory) echo "MEMORY.md" ;;
+    daily)  echo "daily" ;;
+    *)      echo "MEMORY.md" ;;
   esac
 }
 
@@ -165,9 +124,13 @@ fi
 # --- Normal logging ---
 CONTENT="${2:?Missing content to log}"
 
-# Validate content for shell metacharacters and prompt injection
-validate_content "$CONTENT"
-check_prompt_injection "$CONTENT"
+# Rate limit
+check_rate_limit "log-training"
+
+# Validate content: shell safety + tiered prompt injection
+TARGET_FILE=$(_category_to_target "$CATEGORY")
+validate_shell_safety "content" "$CONTENT"
+check_prompt_injection_tiered "$CONTENT" "$TARGET_FILE" "content"
 
 case "$CATEGORY" in
   agents)
